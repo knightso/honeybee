@@ -1,0 +1,7 @@
+#!/bin/sh
+
+cd "$HB_APP"
+
+gb gae test $HB_PKG -run $HB_FUNC
+exit $?
+

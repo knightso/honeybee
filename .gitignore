@@ -22,3 +22,9 @@ _testmain.go
 *.exe
 *.test
 *.prof
+
+gcpkey.json
+github.pubkey
+github_rsa
+test.sh
+queue.yaml

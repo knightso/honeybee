@@ -1,0 +1,7 @@
+queue:
+- name: hb-req
+  mode: pull
+  acl:
+  - user_email: honeybee@your-project.iam.gserviceaccount.com
+  - writer_email: honeybee@your-project.iam.gserviceaccount.com
+
