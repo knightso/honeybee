@@ -313,18 +313,15 @@ func waitForErrors(chs []chan error) error {
 }
 
 func waitForResults(id, commit string) error {
-	keys := make([]*datastore.Key, 0, 100)
+	testsNum := 0
 
-	for pkgname, pkg := range alltests {
+	for _, pkg := range alltests {
 		for _, file := range pkg.TestFiles {
-			for _, f := range file.TestFuncs {
-				key := NewTestResultKey(id, commit, pkgname, f)
-				keys = append(keys, key)
-			}
+			testsNum += len(file.TestFuncs)
 		}
 	}
 
-	results := make(map[string]*TestResult)
+	results := make([]*TestResult, 0, testsNum)
 
 	errorNum := 0
 
@@ -335,18 +332,12 @@ func waitForResults(id, commit string) error {
 			return fmt.Errorf("get result failed: %v", err)
 		}
 
-		for _, r := range rs {
-			key := NewTestResultKey(r.ID, r.Commit, r.Pkg, r.Func)
-			if r.Error != "" {
-				errorNum++
-			}
-			results[key.Encode()] = r
-		}
+		results = append(results, rs...)
 
 		fmt.Printf("\rprocessing... %4d/%d (fail:%d) %dsec",
-			len(results), len(keys), errorNum, (time.Now().UnixNano()-startTime)/1000000000)
+			len(results), testsNum, errorNum, (time.Now().UnixNano()-startTime)/1000000000)
 
-		if len(results) == len(keys) {
+		if len(results) == testsNum {
 			break
 		}
 
@@ -356,12 +347,9 @@ func waitForResults(id, commit string) error {
 	// print results
 	fmt.Println("\n============= result =============")
 
-	lines := make([]string, 0, len(keys))
-	for _, key := range keys {
-		result := results[key.Encode()]
-		if result == nil {
-			continue
-		}
+	lines := make([]string, 0, testsNum)
+
+	for _, result := range results {
 		if result.Error != "" {
 			line := fmt.Sprintf("%s/%s:%s - %s %s", result.Pkg, result.File, result.Func, result.Output, result.Error)
 			lines = append(lines, line)
@@ -374,8 +362,10 @@ func waitForResults(id, commit string) error {
 		fmt.Println(line)
 	}
 
-	if len(keys) != len(results) {
-		return fmt.Errorf("timeout %4d/%d (fail:%d)", len(results), len(keys), errorNum)
+	if len(lines) == 0 {
+		fmt.Println("All passed.")
+	} else if testsNum != len(results) {
+		return fmt.Errorf("timeout %4d/%d (fail:%d)", len(results), testsNum, errorNum)
 	}
 
 	return nil
