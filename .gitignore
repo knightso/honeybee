@@ -28,3 +28,4 @@ github.pubkey
 github_rsa
 test.sh
 queue.yaml
+Dockerfile
