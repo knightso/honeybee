@@ -50,9 +50,12 @@ ARG gcp_project
 ENV HB_GCP_PROJECT $gcp_project
 
 ENV YOUR_REPO /root/your_app
-ENV HB_APP $YOUR_REPO/server
 
 ARG git_url
 RUN git clone $git_url $YOUR_REPO
 
+# 以降はテスト対象プロジェクト毎のビルド準備設定
+# 必要に応じて書き換える
+
+ENV HB_APP $YOUR_REPO/server
 RUN cd $HB_APP && gb vendor restore
