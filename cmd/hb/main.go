@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	queue = "hb-req"
+	reqQueue = "hb-req"
+	resQueue = "hb-res"
 )
 
 var lastCommit string
@@ -40,8 +41,8 @@ type TestResult struct {
 	Pkg       string
 	File      string
 	Func      string
-	Output    string
-	Error     string
+	Output    string `datastore:",noindex"`
+	Error     string `datastore:",noindex"`
 	CreatedAt time.Time
 }
 
@@ -125,6 +126,12 @@ func main() {
 			result.Error = err.Error()
 		}
 
+		if err := insertResult(&result); err != nil {
+			fmt.Fprintf(os.Stderr, "return result failed: %s\n", err.Error())
+			time.Sleep(10 * time.Second)
+			continue
+		}
+
 		key := NewTestResultKey(req.ID, req.Commit, req.Pkg, req.Func)
 
 		_, err = dsClient.Put(ctx, key, &result)
@@ -136,14 +143,46 @@ func main() {
 	}
 }
 
-func runTest(req *Request) (output string, err error) {
-	if req.Commit != lastCommit {
-		if err := checkoutCode(req.Commit); err != nil {
-			lastCommit = "" // just in case
-			return "", fmt.Errorf("git checkout failed: %v", err)
-		}
-		lastCommit = req.Commit
+func insertResult(res *TestResult) error {
+
+	tasksService := taskqueue.NewTasksService(tqService)
+
+	data, err := json.Marshal(res)
+	if err != nil {
+		return err
 	}
+
+	b64 := base64.StdEncoding.EncodeToString(data)
+
+	task := taskqueue.Task{
+		PayloadBase64: b64,
+		QueueName:     resQueue,
+		Tag:           res.ID,
+	}
+
+	call := tasksService.Insert("s~"+project, resQueue, &task)
+
+	_, err = call.Do()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func runTest(req *Request) (output string, err error) {
+	// TODO: 並列テストを増やすとcheckoutに失敗することがあるので一旦外す
+	// それ以前に複数端末から同時checkoutは不作法か・・
+	/*
+		if req.Commit != lastCommit {
+			if output, err := checkoutCode(req.Commit); err != nil {
+				fmt.Fprintf(os.Stderr, "git checkout failed : %s\n%s\n", err.Error(), output)
+				lastCommit = "" // just in case
+				return "", fmt.Errorf("git checkout failed: %v", err)
+			}
+			lastCommit = req.Commit
+		}
+	*/
 
 	cmd := exec.Command("bash", "test.sh")
 	cmd.Env = append(os.Environ(),
@@ -166,7 +205,7 @@ func getRequest(tag string) (*Request, error) {
 
 	tasksService := taskqueue.NewTasksService(tqService)
 
-	call := tasksService.Lease("s~"+project, queue, 1, 60)
+	call := tasksService.Lease("s~"+project, reqQueue, 1, 60)
 
 	if tag != "" {
 		call = call.GroupByTag(true).Tag(tag)
@@ -187,7 +226,7 @@ func getRequest(tag string) (*Request, error) {
 
 	task := tasks.Items[0]
 
-	if err := tasksService.Delete("s~"+project, queue, task.Id).Do(); err != nil {
+	if err := tasksService.Delete("s~"+project, reqQueue, task.Id).Do(); err != nil {
 		return nil, err
 	}
 
@@ -204,7 +243,7 @@ func getRequest(tag string) (*Request, error) {
 	return &req, nil
 }
 
-func checkoutCode(commit string) error {
+func checkoutCode(commit string) (string, error) {
 	fmt.Println("git checkout " + commit)
 
 	cmd := exec.Command("git", "checkout", commit)
@@ -217,8 +256,8 @@ func checkoutCode(commit string) error {
 
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "git checkout failed: %s\n", buf.String())
-		return err
+		return buf.String(), err
 	}
 
-	return nil
+	return "", nil
 }

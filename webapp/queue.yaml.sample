@@ -4,4 +4,10 @@ queue:
   acl:
   - user_email: honeybee@your-project.iam.gserviceaccount.com
   - writer_email: honeybee@your-project.iam.gserviceaccount.com
+- name: hb-res
+  mode: pull
+  acl:
+  - user_email: honeybee@your-project.iam.gserviceaccount.com
+  - writer_email: honeybee@your-project.iam.gserviceaccount.com
+
 

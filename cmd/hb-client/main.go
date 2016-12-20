@@ -14,7 +14,9 @@ import (
 	"log"
 	"os"
 	"path"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -29,7 +31,8 @@ import (
 )
 
 const (
-	queue = "hb-req"
+	reqQueue = "hb-req"
+	resQueue = "hb-res"
 )
 
 type multiError []error
@@ -73,8 +76,8 @@ type TestResult struct {
 	Pkg       string
 	File      string
 	Func      string
-	Output    string
-	Error     string
+	Output    string `datastore:",noindex"`
+	Error     string `datastore:",noindex"`
 	CreatedAt time.Time
 }
 
@@ -282,11 +285,11 @@ func insertRequest(req *Request) error {
 
 	task := taskqueue.Task{
 		PayloadBase64: b64,
-		QueueName:     queue,
-		Tag:           req.Commit,
+		QueueName:     reqQueue,
+		Tag:           req.ID,
 	}
 
-	call := tasksService.Insert("s~"+project, queue, &task)
+	call := tasksService.Insert("s~"+project, reqQueue, &task)
 
 	_, err = call.Do()
 	if err != nil {
@@ -310,6 +313,133 @@ func waitForErrors(chs []chan error) error {
 }
 
 func waitForResults(id, commit string) error {
+	keys := make([]*datastore.Key, 0, 100)
+
+	for pkgname, pkg := range alltests {
+		for _, file := range pkg.TestFiles {
+			for _, f := range file.TestFuncs {
+				key := NewTestResultKey(id, commit, pkgname, f)
+				keys = append(keys, key)
+			}
+		}
+	}
+
+	results := make(map[string]*TestResult)
+
+	errorNum := 0
+
+	retryCount := 30 * 60 // 30 minutes
+	for i := 0; i < retryCount; i++ {
+		rs, err := getResults(id)
+		if err != nil {
+			return fmt.Errorf("get result failed: %v", err)
+		}
+
+		for _, r := range rs {
+			key := NewTestResultKey(r.ID, r.Commit, r.Pkg, r.Func)
+			if r.Error != "" {
+				errorNum++
+			}
+			results[key.Encode()] = r
+		}
+
+		fmt.Printf("\rprocessing... %4d/%d (fail:%d) %dsec",
+			len(results), len(keys), errorNum, (time.Now().UnixNano()-startTime)/1000000000)
+
+		if len(results) == len(keys) {
+			break
+		}
+
+		time.Sleep(1 * time.Second)
+	}
+
+	// print results
+	fmt.Println("\n============= result =============")
+
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		result := results[key.Encode()]
+		if result == nil {
+			continue
+		}
+		if result.Error != "" {
+			line := fmt.Sprintf("%s/%s:%s - %s %s", result.Pkg, result.File, result.Func, result.Output, result.Error)
+			lines = append(lines, line)
+		}
+	}
+
+	sort.Strings(lines)
+
+	for _, line := range lines {
+		fmt.Println(line)
+	}
+
+	if len(keys) != len(results) {
+		return fmt.Errorf("timeout %4d/%d (fail:%d)", len(results), len(keys), errorNum)
+	}
+
+	return nil
+}
+
+func getResults(id string) ([]*TestResult, error) {
+	tasksService := taskqueue.NewTasksService(tqService)
+
+	tasks, err := tasksService.Lease("s~"+project, resQueue, 100, 60).GroupByTag(true).Tag(id).Do()
+	if err != nil {
+		// only log and retry
+		fmt.Fprintf(os.Stderr, "lease task failed: %v", err)
+		time.Sleep(10 * time.Second)
+		return nil, nil
+	}
+
+	if len(tasks.Items) == 0 {
+		return nil, nil
+	}
+
+	var mutex sync.Mutex
+	var wg sync.WaitGroup
+
+	results := make([]*TestResult, 0, len(tasks.Items))
+	for _, task := range tasks.Items {
+		task := task
+
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			if err := tasksService.Delete("s~"+project, resQueue, task.Id).Do(); err != nil {
+				fmt.Fprintf(os.Stderr, "delete task failed: %v\n", err)
+				return
+			}
+
+			payload, err := base64.StdEncoding.DecodeString(task.PayloadBase64)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "decode base64 result: %v\n", err)
+				return
+			}
+
+			var result TestResult
+			if err := json.Unmarshal(payload, &result); err != nil {
+				fmt.Fprintf(os.Stderr, "unmarshal json result: %v\n", err)
+				return
+			}
+
+			mutex.Lock()
+			defer mutex.Unlock()
+			results = append(results, &result)
+		}()
+	}
+
+	wg.Wait()
+
+	return results, nil
+}
+
+// 処理結果をDatastoreより取り出す
+// Datastore ClientがDefferred keyでerrorを返す為、別方式に変更
+// https://github.com/GoogleCloudPlatform/google-cloud-go/blob/3c4c8cc11d151d76587802cb55dd7b80beca832b/datastore/datastore.go#L411
+func _waitForResults(id, commit string) error {
 	ctx := context.Background()
 
 	keys := make([]*datastore.Key, 0, 100)
@@ -376,7 +506,7 @@ func waitForResults(id, commit string) error {
 			continue
 		}
 		if result.Error != "" {
-			fmt.Println("%s/%s:%s - %s %s", result.Pkg, result.File, result.Func, result.Output, result.Error)
+			fmt.Printf("%s/%s:%s - %s %s\n", result.Pkg, result.File, result.Func, result.Output, result.Error)
 		}
 	}
 
